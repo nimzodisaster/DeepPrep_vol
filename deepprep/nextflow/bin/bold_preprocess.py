@@ -21,7 +21,7 @@ def get_output_space(output_spaces):
             _output_spaces.append(output_space)
     return _output_spaces
 
-
+#run_msmsulc = True ; run_reconall = True
 def update_config(bids_dir, bold_preprocess_dir, work_dir, fs_license_file, fs_subjects_dir,
                   subject_id, task_id, spaces):
     config.execution.bids_dir = bids_dir
@@ -51,7 +51,10 @@ def update_config(bids_dir, bold_preprocess_dir, work_dir, fs_license_file, fs_s
     config.workflow.regressors_all_comps = False
     config.workflow.regressors_dvars_th = 1.5
     config.workflow.regressors_fd_th = 0.5
-    config.workflow.run_reconall = True
+    if 'fsnative' in spaces:
+        config.workflow.run_reconall = False
+    else
+        config.workflow.run_reconall = False
     config.workflow.spaces = "sbref run individual"
     config.workflow.use_aroma = False
     config.workflow.use_bbr = True
@@ -291,10 +294,13 @@ if __name__ == '__main__':
         # set mri_coreg ref_mask 'bold_wf.bold_fit_wf.bold_reg_wf.bbreg_wf.mri_coreg'
         aparc_aseg_mgz = os.path.join(args.subjects_dir, subject_id, 'mri', 'aparc+aseg.mgz')
         aparc_aseg_presurf_mgz = os.path.join(args.subjects_dir, subject_id, 'mri', 'aparc+aseg.presurf.mgz')
+        aseg_auto = os.path.join(args.subjects_dir, subject_id, 'mri', 'aseg.auto.mgz')
         if os.path.exists(aparc_aseg_mgz):
             ref_mask = aparc_aseg_mgz
         elif os.path.exists(aparc_aseg_presurf_mgz):
             ref_mask = aparc_aseg_presurf_mgz
+        elif os.path.exists(aseg_auto):
+            ref_mask = aseg_auto
         else:
             raise FileExistsError(f'ref_mask is not exists: {aparc_aseg_mgz} or {aparc_aseg_presurf_mgz}')
         mri_coreg_node_name = ''
