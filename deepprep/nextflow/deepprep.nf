@@ -1442,6 +1442,45 @@ process bold_pre_process {
     """
 }
 
+process bold_pre_process_vol_only {
+    tag "${bold_id}"
+
+    cpus 4
+    memory '5 GB'
+
+    input:
+    val(bids_dir)
+    val(subjects_dir)
+    val(bold_preprocess_dir)
+    val(work_dir)
+    val(bold_spaces)
+    tuple(val(subject_id), val(bold_id), val(bold_fieldmap_done), val(t1_nii), val(mask_nii), val(wm_dseg_nii), val(aparc_aseg_mgz),val(fsnative2T1w_xfm), path(subject_boldfile_txt))
+    val(fs_license_file)
+    val(bold_sdc)
+    val(qc_result_path)
+
+    output:
+    tuple(val(subject_id), val(bold_id), path(subject_boldfile_txt))
+
+    script:
+    task_id = bold_id.split('task-')[1].split('_')[0]
+    script_py = "bold_preprocess.py"
+    """
+    ${script_py} \
+    --bids_dir ${bids_dir} \
+    --subjects_dir ${subjects_dir} \
+    --bold_preprocess_dir ${bold_preprocess_dir} \
+    --work_dir ${work_dir}/bold_preprocess \
+    --subject_id ${subject_id} \
+    --task_id ${task_id} \
+    --bold_series ${subject_boldfile_txt} \
+    --bold_spaces ${bold_spaces} \
+    --t1w_preproc ${t1_nii} \
+    --t1w_mask ${mask_nii} \
+    --t1w_dseg ${wm_dseg_nii} \
+    --qc_result_path ${qc_result_path}
+    """
+}
 
 process bold_get_bold_file_in_bids {
 
@@ -2628,7 +2667,6 @@ workflow anat_wf {
     fsthreads = params.fs_threads
 
     fastsurfer_home = params.fastsurfer_home
-
     freesurfer_home = params.freesurfer_home
 
     fastcsr_home = params.fastcsr_home
@@ -2644,17 +2682,15 @@ workflow anat_wf {
 
     device = params.device
 
+    run_surface_steps = (params.bold_surface_spaces && params.bold_surface_spaces.toString().toUpperCase() != 'NONE')
+
     subject_t1wfile_txt = anat_get_t1w_file_in_bids(bids_dir, participant_label, gpu_lock)
     subject_id = anat_create_subject_orig_dir(subjects_dir, subject_t1wfile_txt, deepprep_version)
-
     anat_summary = anat_create_summary(bids_dir, subjects_dir, subject_id, qc_result_path, work_dir, deepprep_version)
-    // freesurfer
-    (orig_mgz, rawavg_mgz) = anat_motioncor(subjects_dir, subject_id, fsthreads)
 
-    // fastsurfer
+    (orig_mgz, rawavg_mgz) = anat_motioncor(subjects_dir, subject_id, fsthreads)
     seg_deep_mgz = anat_segment(subjects_dir, orig_mgz, fastsurfer_home, device, gpu_lock)
     (aseg_auto_noccseg_mgz, mask_mgz) = anat_reduce_to_aseg(subjects_dir, seg_deep_mgz, fastsurfer_home)
-
     anat_N4_bias_correct_input = orig_mgz.join(mask_mgz)
     orig_nu_mgz = anat_N4_bias_correct(subjects_dir, anat_N4_bias_correct_input, fastsurfer_home, fsthreads)
 
@@ -2669,153 +2705,151 @@ workflow anat_wf {
     anat_paint_cc_to_aseg_input = norm_mgz.join(seg_deep_mgz).join(aseg_auto_noccseg_mgz)
     (aseg_auto_mgz, seg_deep_withcc_mgz) = anat_paint_cc_to_aseg(subjects_dir, anat_paint_cc_to_aseg_input, fastsurfer_home)
 
-    // freesurfer
-    anat_paint_cc_to_aseg_input = aseg_auto_mgz.join(norm_mgz).join(brainmask_mgz).join(talairach_lta)
-    (aseg_presurf_mgz, brain_mgz, brain_finalsurfs_mgz, wm_mgz, filled_mgz) = anat_fill(subjects_dir, anat_paint_cc_to_aseg_input, fsthreads)
 
-    // ####################### Split two channel #######################
-    hemis = Channel.of('lh', 'rh')
-    subject_id_lh = subject_id_hemi_lh(aseg_presurf_mgz)
-    subject_id_rh = subject_id_hemi_rh(aseg_presurf_mgz)
-    hemis_orig_mgz = split_hemi_orig_mgz(hemis, orig_mgz)
-    hemis_rawavg_mgz = split_hemi_rawavg_mgz(hemis, rawavg_mgz)
-    hemis_brainmask_mgz = split_hemi_brainmask_mgz(hemis, brainmask_mgz)
-    hemis_aseg_presurf_mgz = split_hemi_aseg_presurf_mgz(hemis, aseg_presurf_mgz)
-    hemis_brain_finalsurfs_mgz = split_hemi_brain_finalsurfs_mgz(hemis, brain_finalsurfs_mgz)
-    hemis_wm_mgz = split_hemi_wm_mgz(hemis, wm_mgz)
-    hemis_filled_mgz = split_hemi_filled_mgz(hemis, filled_mgz)
 
-    // fastcsr
-    // hemi levelset_nii
-    anat_fastcsr_levelset_input = orig_mgz.join(filled_mgz)
-    levelset_nii = anat_fastcsr_levelset(subjects_dir, anat_fastcsr_levelset_input, fastcsr_home, fastcsr_model_path, hemis, device, gpu_lock)
+    if (run_surface_steps) {
+        // If running surface steps:
+        anat_fill_input = aseg_auto_mgz.join(norm_mgz).join(brainmask_mgz).join(talairach_lta)
+        (aseg_presurf_mgz, brain_mgz, brain_finalsurfs_mgz, wm_mgz, filled_mgz) = anat_fill(subjects_dir, anat_fill_input, fsthreads)
+        hemis = Channel.of('lh', 'rh')
+        subject_id_lh = subject_id_hemi_lh(aseg_presurf_mgz)
+        subject_id_rh = subject_id_hemi_rh(aseg_presurf_mgz)
+        hemis_orig_mgz = split_hemi_orig_mgz(hemis, orig_mgz)
+        hemis_rawavg_mgz = split_hemi_rawavg_mgz(hemis, rawavg_mgz)
+        hemis_brainmask_mgz = split_hemi_brainmask_mgz(hemis, brainmask_mgz)
+        hemis_aseg_presurf_mgz = split_hemi_aseg_presurf_mgz(hemis, aseg_presurf_mgz)
+        hemis_brain_finalsurfs_mgz = split_hemi_brain_finalsurfs_mgz(hemis, brain_finalsurfs_mgz)
+        hemis_wm_mgz = split_hemi_wm_mgz(hemis, wm_mgz)
+        hemis_filled_mgz = split_hemi_filled_mgz(hemis, filled_mgz)
 
-    // hemi orig_surf, orig_premesh_surf
-    anat_fastcsr_mksurface_input = levelset_nii.join(hemis_orig_mgz, by: [0, 1]).join(hemis_brainmask_mgz, by: [0, 1]).join(hemis_aseg_presurf_mgz, by: [0, 1])
-    (orig_surf, orig_premesh_surf) = anat_fastcsr_mksurface(subjects_dir, anat_fastcsr_mksurface_input, fastcsr_home)
+        anat_fastcsr_levelset_input = orig_mgz.join(filled_mgz)
+        levelset_nii = anat_fastcsr_levelset(subjects_dir, anat_fastcsr_levelset_input, fastcsr_home, fastcsr_model_path, hemis, device, gpu_lock)
 
-    // hemi autodet_gwstats
-    anat_autodet_gwstats_input = orig_premesh_surf.join(hemis_brain_finalsurfs_mgz, by: [0, 1]).join(hemis_wm_mgz, by: [0, 1])
-    autodet_gwstats = anat_autodet_gwstats(subjects_dir, anat_autodet_gwstats_input)
+        anat_fastcsr_mksurface_input = levelset_nii.join(hemis_orig_mgz, by: [0, 1]).join(hemis_brainmask_mgz, by: [0, 1]).join(hemis_aseg_presurf_mgz, by: [0, 1])
+        (orig_surf, orig_premesh_surf) = anat_fastcsr_mksurface(subjects_dir, anat_fastcsr_mksurface_input, fastcsr_home)
 
-    // hemi white_preaparc_surf, white_surf, curv_surf, area_surf
-    anat_white_surface_input = orig_surf.join(autodet_gwstats, by: [0, 1]).join(hemis_aseg_presurf_mgz, by: [0, 1]).join(hemis_brain_finalsurfs_mgz, by: [0, 1]).join(hemis_wm_mgz, by: [0, 1]).join(hemis_filled_mgz, by: [0, 1])
-    (white_preaparc_surf, white_surf, curv_surf, area_surf) = anat_white_surface(subjects_dir, anat_white_surface_input)
+        anat_autodet_gwstats_input = orig_premesh_surf.join(hemis_brain_finalsurfs_mgz, by: [0, 1]).join(hemis_wm_mgz, by: [0, 1])
+        autodet_gwstats = anat_autodet_gwstats(subjects_dir, anat_autodet_gwstats_input)
 
-    // hemi aseg_presurf_mgz, white_preaparc_surf
-    anat_cortex_hipamyg_label_input = white_preaparc_surf.join(hemis_aseg_presurf_mgz, by: [0, 1])
-    cortex_label = anat_cortex_label(subjects_dir, anat_cortex_hipamyg_label_input)
-    cortex_hipamyg_label = anat_cortex_hipamyg_label(subjects_dir, anat_cortex_hipamyg_label_input)
+        anat_white_surface_input = orig_surf.join(autodet_gwstats, by: [0, 1]).join(hemis_aseg_presurf_mgz, by: [0, 1]).join(hemis_brain_finalsurfs_mgz, by: [0, 1]).join(hemis_wm_mgz, by: [0, 1]).join(hemis_filled_mgz, by: [0, 1])
+        (white_preaparc_surf, white_surf, curv_surf, area_surf) = anat_white_surface(subjects_dir, anat_white_surface_input)
 
-    // anat_hyporelabel
-    lh_anat_hyporelabel_input = white_surf.join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
-    rh_anat_hyporelabel_input = white_surf.join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
-    anat_hyporelabel_inputs = aseg_presurf_mgz.join(lh_anat_hyporelabel_input).join(rh_anat_hyporelabel_input)
-    aseg_presurf_hypos_mgz = anat_hyporelabel(subjects_dir, anat_hyporelabel_inputs)
+        anat_cortex_hipamyg_label_input = white_preaparc_surf.join(hemis_aseg_presurf_mgz, by: [0, 1])
+        cortex_label = anat_cortex_label(subjects_dir, anat_cortex_hipamyg_label_input)
+        cortex_hipamyg_label = anat_cortex_hipamyg_label(subjects_dir, anat_cortex_hipamyg_label_input)
 
-    // hemi white_preaparc_surf
-    (smoothwm_surf, inflated_surf, sulc_surf) = anat_smooth_inflated(subjects_dir, white_preaparc_surf)
+        lh_anat_hyporelabel_input = white_surf.join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
+        rh_anat_hyporelabel_input = white_surf.join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
+        anat_hyporelabel_inputs = aseg_presurf_mgz.join(lh_anat_hyporelabel_input).join(rh_anat_hyporelabel_input)
+        aseg_presurf_hypos_mgz = anat_hyporelabel(subjects_dir, anat_hyporelabel_inputs)
 
-    // smoothwm_surf, inflated_surf, sulc_surf
-    anat_curv_stats_input = smoothwm_surf.join(curv_surf, by: [0, 1]).join(sulc_surf, by: [0, 1])
-    curv_stats = anat_curv_stats(subjects_dir, anat_curv_stats_input)
-    sphere_surf = anat_sphere(subjects_dir, inflated_surf)
+        (smoothwm_surf, inflated_surf, sulc_surf) = anat_smooth_inflated(subjects_dir, white_preaparc_surf)
 
-    // curv_surf, sulc_surf, sphere_surf
-    anat_sphere_register_input = curv_surf.join(sulc_surf, by: [0, 1]).join(sphere_surf, by: [0, 1])
-    sphere_reg_surf = anat_sphere_register(subjects_dir, anat_sphere_register_input, surfreg_home, surfreg_model_path, freesurfer_home, device, gpu_lock)
+        anat_curv_stats_input = smoothwm_surf.join(curv_surf, by: [0, 1]).join(sulc_surf, by: [0, 1])
+        curv_stats = anat_curv_stats(subjects_dir, anat_curv_stats_input)
+        sphere_surf = anat_sphere(subjects_dir, inflated_surf)
 
-    // white_preaparc_surf, sphere_reg_surf
-    anat_jacobian_input = white_preaparc_surf.join(sphere_reg_surf, by: [0, 1])
-    jacobian_white = anat_jacobian(subjects_dir, anat_jacobian_input)
+        anat_sphere_register_input = curv_surf.join(sulc_surf, by: [0, 1]).join(sphere_surf, by: [0, 1])
+        sphere_reg_surf = anat_sphere_register(subjects_dir, anat_sphere_register_input, surfreg_home, surfreg_model_path, freesurfer_home, device, gpu_lock)
 
-    // cortex_label, sphere_reg_surf, smoothwm_surf
-    anat_cortparc_aparc_input = cortex_label.join(sphere_reg_surf, by: [0, 1]).join(smoothwm_surf, by: [0, 1]).join(hemis_aseg_presurf_mgz, by: [0, 1])
-    aparc_annot = anat_cortparc_aparc(subjects_dir, anat_cortparc_aparc_input, freesurfer_home)
+        anat_jacobian_input = white_preaparc_surf.join(sphere_reg_surf, by: [0, 1])
+        jacobian_white = anat_jacobian(subjects_dir, anat_jacobian_input)
 
-    anat_pial_surface_input = orig_surf.join(white_surf, by: [0, 1]).join(autodet_gwstats, by: [0, 1]).join(cortex_hipamyg_label, by: [0, 1]).join(cortex_label, by: [0, 1]).join(aparc_annot, by: [0, 1]).join(hemis_aseg_presurf_mgz, by: [0, 1]).join(hemis_wm_mgz, by: [0, 1]).join(hemis_brain_finalsurfs_mgz, by: [0, 1])
-    (pial_surf, pial_t1_surf, curv_pial_surf, area_pial_surf, thickness_surf) = anat_pial_surface(subjects_dir, anat_pial_surface_input)
-    anat_pctsurfcon_input = cortex_label.join(white_surf, by: [0, 1]).join(thickness_surf, by: [0, 1]).join(hemis_rawavg_mgz, by: [0, 1]).join(hemis_orig_mgz, by: [0, 1])
-    (w_g_pct_mgh, w_g_pct_stats) = anat_pctsurfcon(subjects_dir, anat_pctsurfcon_input)
+        anat_cortparc_aparc_input = cortex_label.join(sphere_reg_surf, by: [0, 1]).join(smoothwm_surf, by: [0, 1]).join(hemis_aseg_presurf_mgz, by: [0, 1])
+        aparc_annot = anat_cortparc_aparc(subjects_dir, anat_cortparc_aparc_input, freesurfer_home)
 
-    // need lh and rh
-    lh_anat_parcstats_input = white_surf.join(cortex_label, by: [0, 1]).join(pial_surf, by: [0, 1]).join(aparc_annot, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
-    rh_anat_parcstats_input = white_surf.join(cortex_label, by: [0, 1]).join(pial_surf, by: [0, 1]).join(aparc_annot, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
-    anat_parcstats_input = lh_anat_parcstats_input.join(rh_anat_parcstats_input).join(wm_mgz)
-    (aparc_pial_stats, aparc_stats) = anat_parcstats(subjects_dir, anat_parcstats_input)
+        anat_pial_surface_input = orig_surf.join(white_surf, by: [0, 1]).join(autodet_gwstats, by: [0, 1]).join(cortex_hipamyg_label, by: [0, 1]).join(cortex_label, by: [0, 1]).join(aparc_annot, by: [0, 1]).join(hemis_aseg_presurf_mgz, by: [0, 1]).join(hemis_wm_mgz, by: [0, 1]).join(hemis_brain_finalsurfs_mgz, by: [0, 1])
+        (pial_surf, pial_t1_surf, curv_pial_surf, area_pial_surf, thickness_surf) = anat_pial_surface(subjects_dir, anat_pial_surface_input)
+        anat_pctsurfcon_input = cortex_label.join(white_surf, by: [0, 1]).join(thickness_surf, by: [0, 1]).join(hemis_rawavg_mgz, by: [0, 1]).join(hemis_orig_mgz, by: [0, 1])
+        (w_g_pct_mgh, w_g_pct_stats) = anat_pctsurfcon(subjects_dir, anat_pctsurfcon_input)
 
-    // aparc2aseg: create aparc+aseg and aseg
-    lh_anat_ribbon_mgz_input = white_surf.join(pial_surf, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3] }
-    rh_anat_ribbon_mgz_input = white_surf.join(pial_surf, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3] }
-    anat_ribbon_mgz_inputs = aseg_presurf_mgz.join(lh_anat_ribbon_mgz_input).join(rh_anat_ribbon_mgz_input)
-    (ribbon_mgz, lh_ribbon_mgz, rh_ribbon_mgz) = anat_ribbon(subjects_dir, anat_ribbon_mgz_inputs)
+        lh_anat_parcstats_input = white_surf.join(cortex_label, by: [0, 1]).join(pial_surf, by: [0, 1]).join(aparc_annot, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
+        rh_anat_parcstats_input = white_surf.join(cortex_label, by: [0, 1]).join(pial_surf, by: [0, 1]).join(aparc_annot, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
+        anat_parcstats_input = lh_anat_parcstats_input.join(rh_anat_parcstats_input).join(wm_mgz)
+        (aparc_pial_stats, aparc_stats) = anat_parcstats(subjects_dir, anat_parcstats_input)
 
-    lh_anat_apas2aseg_input = white_surf.join(pial_surf, by: [0, 1]).join(cortex_label, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4] }
-    rh_anat_apas2aseg_input = white_surf.join(pial_surf, by: [0, 1]).join(cortex_label, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4] }
-    anat_apas2aseg_inputs = aseg_presurf_hypos_mgz.join(ribbon_mgz).join(lh_anat_apas2aseg_input).join(rh_anat_apas2aseg_input)
-    (aseg_mgz, brainvol_stats) = anat_apas2aseg(subjects_dir, anat_apas2aseg_inputs, fsthreads)
+        lh_anat_ribbon_mgz_input = white_surf.join(pial_surf, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3] }
+        rh_anat_ribbon_mgz_input = white_surf.join(pial_surf, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3] }
+        anat_ribbon_mgz_inputs = aseg_presurf_mgz.join(lh_anat_ribbon_mgz_input).join(rh_anat_ribbon_mgz_input)
+        (ribbon_mgz, lh_ribbon_mgz, rh_ribbon_mgz) = anat_ribbon(subjects_dir, anat_ribbon_mgz_inputs)
 
-    lh_anat_aparc2aseg_input = white_surf.join(pial_surf, by: [0, 1]).join(cortex_label, by: [0, 1]).join(aparc_annot, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
-    rh_anat_aparc2aseg_input = white_surf.join(pial_surf, by: [0, 1]).join(cortex_label, by: [0, 1]).join(aparc_annot, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
-    anat_aparc2aseg_inputs = aseg_mgz.join(ribbon_mgz).join(lh_anat_aparc2aseg_input).join(rh_anat_aparc2aseg_input)
-    aparc_aseg_mgz = anat_aparc2aseg(subjects_dir, anat_aparc2aseg_inputs, fsthreads)
+        lh_anat_apas2aseg_input = white_surf.join(pial_surf, by: [0, 1]).join(cortex_label, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4] }
+        rh_anat_apas2aseg_input = white_surf.join(pial_surf, by: [0, 1]).join(cortex_label, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4] }
+        anat_apas2aseg_inputs = aseg_presurf_hypos_mgz.join(ribbon_mgz).join(lh_anat_apas2aseg_input).join(rh_anat_apas2aseg_input)
+        (aseg_mgz, brainvol_stats) = anat_apas2aseg(subjects_dir, anat_apas2aseg_inputs, fsthreads)
 
-    // QC report
-    qc_plot_volsurf_input_lh = white_surf.join(pial_surf, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3] }
-    qc_plot_volsurf_input_rh = white_surf.join(pial_surf, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3] }
-    qc_plot_volsurf_input = qc_plot_volsurf_input_lh.join(qc_plot_volsurf_input_rh).join(t1_mgz)
-    vol_surface_svg = qc_plot_volsurf(subjects_dir, qc_plot_volsurf_input, qc_utils_path, qc_result_path, freesurfer_home)
+        lh_anat_aparc2aseg_input = white_surf.join(pial_surf, by: [0, 1]).join(cortex_label, by: [0, 1]).join(aparc_annot, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
+        rh_anat_aparc2aseg_input = white_surf.join(pial_surf, by: [0, 1]).join(cortex_label, by: [0, 1]).join(aparc_annot, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
+        anat_aparc2aseg_inputs = aseg_mgz.join(ribbon_mgz).join(lh_anat_aparc2aseg_input).join(rh_anat_aparc2aseg_input)
+        aparc_aseg_mgz = anat_aparc2aseg(subjects_dir, anat_aparc2aseg_inputs, fsthreads)
 
-    qc_plot_surfparc_input_lh = aparc_annot.join(white_surf, by: [0, 1]).join(pial_surf, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4] }
-    qc_plot_surfparc_input_rh = aparc_annot.join(white_surf, by: [0, 1]).join(pial_surf, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4] }
-    qc_plot_surfparc_input = qc_plot_surfparc_input_lh.join(qc_plot_surfparc_input_rh)
-    surface_parc_svg = qc_plot_surfparc(subjects_dir, qc_plot_surfparc_input, qc_utils_path, qc_result_path, freesurfer_home)
+        qc_plot_volsurf_input_lh = white_surf.join(pial_surf, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3] }
+        qc_plot_volsurf_input_rh = white_surf.join(pial_surf, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3] }
+        qc_plot_volsurf_input = qc_plot_volsurf_input_lh.join(qc_plot_volsurf_input_rh).join(t1_mgz)
+        vol_surface_svg = qc_plot_volsurf(subjects_dir, qc_plot_volsurf_input, qc_utils_path, qc_result_path, freesurfer_home)
 
-    qc_plot_aparc_aseg_input = norm_mgz.join(aparc_aseg_mgz)
-    aparc_aseg_svg = qc_plot_aparc_aseg(subjects_dir, qc_plot_aparc_aseg_input, qc_utils_path, qc_result_path, freesurfer_home)
+        qc_plot_surfparc_input_lh = aparc_annot.join(white_surf, by: [0, 1]).join(pial_surf, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4] }
+        qc_plot_surfparc_input_rh = aparc_annot.join(white_surf, by: [0, 1]).join(pial_surf, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4] }
+        qc_plot_surfparc_input = qc_plot_surfparc_input_lh.join(qc_plot_surfparc_input_rh)
+        surface_parc_svg = qc_plot_surfparc(subjects_dir, qc_plot_surfparc_input, qc_utils_path, qc_result_path, freesurfer_home)
 
-    qc_report = qc_anat_create_report(bids_dir, subjects_dir, qc_result_path, aparc_aseg_svg, reports_utils_path)
+        qc_plot_aparc_aseg_input = norm_mgz.join(aparc_aseg_mgz)
+        aparc_aseg_svg = qc_plot_aparc_aseg(subjects_dir, qc_plot_aparc_aseg_input, qc_utils_path, qc_result_path, freesurfer_home)
 
-    // APP
-    if (params.preprocess_others.toString().toUpperCase() == 'TRUE') {
-        println "INFO: anat preprocess others == TURE"
-        avg_curv = anat_avgcurv(subjects_dir, sphere_reg_surf, freesurfer_home)  // if for paper, comment out
+        qc_report = qc_anat_create_report(bids_dir, subjects_dir, qc_result_path, aparc_aseg_svg, reports_utils_path)
+    } else {
+        // If NOT running surface steps, emit empty channels for all surface-related outputs:
+        aseg_mgz = aseg_auto_mgz
+        aparc_aseg_mgz = aseg_auto_mgz
 
-        aparc_a2009s_annot = anat_cortparc_aparc_a2009s(subjects_dir, anat_cortparc_aparc_input, freesurfer_home)  // if for paper, comment out
-
-        lh_anat_parcstats2_input = white_surf.join(cortex_label, by: [0, 1]).join(pial_surf, by: [0, 1]).join(aparc_a2009s_annot, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
-        rh_anat_parcstats2_input = white_surf.join(cortex_label, by: [0, 1]).join(pial_surf, by: [0, 1]).join(aparc_a2009s_annot, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
-        anat_parcstats2_input = lh_anat_parcstats2_input.join(rh_anat_parcstats2_input).join(wm_mgz)
-        (aparc_pial_stats, aparc_stats) = anat_parcstats2(subjects_dir, anat_parcstats2_input)  // if for paper, comment out
-
-        lh_anat_aparc_a2009s2aseg_input = white_surf.join(pial_surf, by: [0, 1]).join(cortex_label, by: [0, 1]).join(aparc_a2009s_annot, by: [0, 1]).join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
-        rh_anat_aparc_a2009s2aseg_input = white_surf.join(pial_surf, by: [0, 1]).join(cortex_label, by: [0, 1]).join(aparc_a2009s_annot, by: [0, 1]).join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2, 3, 4, 5] }
-        anat_aparc_a2009s2aseg_inputs = aseg_mgz.join(ribbon_mgz).join(lh_anat_aparc_a2009s2aseg_input).join(rh_anat_aparc_a2009s2aseg_input)
-        aparc_a2009s_aseg_mgz = anat_aparc_a2009s2aseg(subjects_dir, anat_aparc_a2009s2aseg_inputs, fsthreads)  // if for paper, comment out
-
-        //  *exvivo* labels
-        balabels_lh = Channel.fromPath("${freesurfer_home}/subjects/fsaverage/label/*lh*exvivo*.label")
-        balabels_rh = Channel.fromPath("${freesurfer_home}/subjects/fsaverage/label/*rh*exvivo*.label")
-        anat_balabels_input_lh = sphere_reg_surf.join(white_surf, by: [0, 1]).join(subject_id_lh, by: [0, 1])
-        anat_balabels_input_rh = sphere_reg_surf.join(white_surf, by: [0, 1]).join(subject_id_rh, by: [0, 1])
-        balabel_lh = anat_balabels_lh(subjects_dir, anat_balabels_input_lh, balabels_lh)  // if for paper, comment out
-        balabel_rh = anat_balabels_rh(subjects_dir, anat_balabels_input_rh, balabels_rh)  // if for paper, comment out
-
-        anat_ca_register_input = brainmask_mgz.join(talairach_lta).join(norm_mgz)
-        talairach_m3z = anat_ca_register(subjects_dir, anat_ca_register_input, freesurfer_home)
-        anat_segstats_input = aseg_mgz.join(norm_mgz).join(brainmask_mgz).join(ribbon_mgz)
-        aseg_stats = anat_segstats(subjects_dir, anat_segstats_input, freesurfer_home)
+        // Surfaces
+        pial_surf = Channel.empty()
+        white_surf = Channel.empty()
+        curv_surf = Channel.empty()
+        area_surf = Channel.empty()
+        cortex_label = Channel.empty()
+        aparc_annot = Channel.empty()
+        // etc. for all other surface-related outputs that appear in the code above:
+        seg_deep_withcc_mgz = Channel.empty()
+        aseg_presurf_hypos_mgz = Channel.empty()
+        smoothwm_surf = Channel.empty()
+        inflated_surf = Channel.empty()
+        sulc_surf = Channel.empty()
+        curv_stats = Channel.empty()
+        sphere_surf = Channel.empty()
+        sphere_reg_surf = Channel.empty()
+        jacobian_white = Channel.empty()
+        pial_t1_surf = Channel.empty()
+        curv_pial_surf = Channel.empty()
+        area_pial_surf = Channel.empty()
+        thickness_surf = Channel.empty()
+        w_g_pct_mgh = Channel.empty()
+        w_g_pct_stats = Channel.empty()
+        aparc_pial_stats = Channel.empty()
+        aparc_stats = Channel.empty()
+        ribbon_mgz = Channel.empty()
+        lh_ribbon_mgz = Channel.empty()
+        rh_ribbon_mgz = Channel.empty()
+        brainvol_stats = Channel.empty()
+        vol_surface_svg = Channel.empty()
+        surface_parc_svg = Channel.empty()
+        aparc_aseg_svg = Channel.empty()
+        qc_report = Channel.empty()
+        lh_pial_surf = Channel.empty()
+        rh_pial_surf = Channel.empty()
+        lh_white_surf = Channel.empty()
+        rh_white_surf = Channel.empty()
+        lh_cortex_label = Channel.empty()
+        rh_cortex_label = Channel.empty()
+        lh_aparc_annot = Channel.empty()
+        rh_aparc_annot = Channel.empty()
+        aseg_presurf_mgz = Channel.empty()
+        brain_mgz = Channel.empty()
+        brain_finalsurfs_mgz = Channel.empty()
+        wm_mgz = Channel.empty()
+        filled_mgz = Channel.empty()
     }
-
-    lh_pial_surf = pial_surf.join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
-    rh_pial_surf = pial_surf.join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
-    lh_white_surf = white_surf.join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
-    rh_white_surf = white_surf.join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
-    lh_cortex_label = cortex_label.join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
-    rh_cortex_label = cortex_label.join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
-    lh_aparc_annot = aparc_annot.join(subject_id_lh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
-    rh_aparc_annot = aparc_annot.join(subject_id_rh, by: [0, 1]).map { tuple -> return tuple[0, 2] }
-
+//(t1_mgz, mask_mgz, norm_mgz, aseg_presurf_mgz, aseg_mgz, lh_pial_surf, rh_pial_surf, lh_white_surf, rh_white_surf, lh_cortex_label, rh_cortex_label, lh_aparc_annot, rh_aparc_annot, aparc_aseg_mgz)
     emit:
     t1_mgz
     brainmask_mgz
@@ -2831,7 +2865,9 @@ workflow anat_wf {
     lh_aparc_annot
     rh_aparc_annot
     aparc_aseg_mgz
+
 }
+
 
 
 workflow bold_wf {
@@ -2871,8 +2907,10 @@ workflow bold_wf {
 
     bold_sdc = params.bold_sdc.toString().toUpperCase()
     bold_spaces = params.bold_surface_spaces
-
     do_bold_confounds = params.bold_confounds.toString().toUpperCase()
+
+    // Determine if we have surface steps
+    run_surface_steps = (bold_spaces && bold_spaces.toString().toUpperCase() != 'NONE')
 
     // set software path
     freesurfer_home = params.freesurfer_home
@@ -2891,77 +2929,178 @@ workflow bold_wf {
 
     subject_boldfile_txt = bold_get_bold_file_in_bids(bids_dir, subjects_dir, participant_label, bold_task_type, bold_only, gpu_lock)
     (subject_id, boldfile_id, subject_boldfile_txt) = subject_boldfile_txt.flatten().multiMap { it ->
-                                                                                     a: it.name.split('_')[0]
-                                                                                     c: it.name
-                                                                                     b: [it.name.split('_')[0], it] }
+        a: it.name.split('_')[0]
+        c: it.name
+        b: [it.name.split('_')[0], it] 
+    }
+
     subject_id_boldfile_id = subject_id.merge(boldfile_id)
-    // filter the recon result by subject_id from BOLD file.
-    // this can suit for 'bold_only' or 'subjects to do Recon more than subjects to do BOLD preprocess'
     (subject_id_unique, boldfile_id_unique) = subject_id_boldfile_id.groupTuple(sort: true).multiMap { tuple ->
-                                                                                                    a: tuple[0]
-                                                                                                    b: tuple[1][0] }
+        a: tuple[0]
+        b: tuple[1][0]
+    }
+
     bold_summary = bold_create_summary(bids_dir, subjects_dir, subject_id_unique, bold_task_type, template_space, qc_result_path, work_dir, deepprep_version)
 
     t1_mgz = subject_id_unique.join(t1_mgz)
     mask_mgz = subject_id_unique.join(mask_mgz)
-    norm_mgz = subject_id_unique.join(norm_mgz)
-    aseg_presurf_mgz = subject_id_unique.join(aseg_presurf_mgz)
-    aseg_mgz = subject_id_unique.join(aseg_mgz)
-    lh_pial_surf = subject_id_unique.join(lh_pial_surf)
-    rh_pial_surf = subject_id_unique.join(rh_pial_surf)
-    lh_white_surf = subject_id_unique.join(lh_white_surf)
-    rh_white_surf = subject_id_unique.join(rh_white_surf)
-    lh_cortex_label = subject_id_unique.join(lh_cortex_label)
-    rh_cortex_label = subject_id_unique.join(rh_cortex_label)
-    lh_aparc_annot = subject_id_unique.join(lh_aparc_annot)
-    rh_aparc_annot = subject_id_unique.join(rh_aparc_annot)
-    aparc_aseg_mgz = subject_id_unique.join(aparc_aseg_mgz)
-    // end filter
 
-    // BOLD preprocess
-    pial_surf = lh_pial_surf.join(rh_pial_surf, by:[0])
-    white_surf = lh_white_surf.join(rh_white_surf, by:[0])
-    cortex_label = lh_cortex_label.join(rh_cortex_label, by:[0])
-    aparc_annot = lh_aparc_annot.join(rh_aparc_annot, by:[0])
+
+    // If surfaces are available, join them. Otherwise, create empty channels.
+    if (run_surface_steps) {
+        norm_mgz = subject_id_unique.join(norm_mgz)
+        aseg_presurf_mgz = subject_id_unique.join(aseg_presurf_mgz)
+        aseg_mgz = subject_id_unique.join(aseg_mgz)
+        lh_pial_surf = subject_id_unique.join(lh_pial_surf)
+        rh_pial_surf = subject_id_unique.join(rh_pial_surf)
+        lh_white_surf = subject_id_unique.join(lh_white_surf)
+        rh_white_surf = subject_id_unique.join(rh_white_surf)
+        lh_cortex_label = subject_id_unique.join(lh_cortex_label)
+        rh_cortex_label = subject_id_unique.join(rh_cortex_label)
+        lh_aparc_annot = subject_id_unique.join(lh_aparc_annot)
+        rh_aparc_annot = subject_id_unique.join(rh_aparc_annot)
+
+        pial_surf = lh_pial_surf.join(rh_pial_surf, by:[0])
+        white_surf = lh_white_surf.join(rh_white_surf, by:[0])
+        cortex_label = lh_cortex_label.join(rh_cortex_label, by:[0])
+        aparc_annot = lh_aparc_annot.join(rh_aparc_annot, by:[0])
+    } else {
+        // No surfaces available
+        lh_pial_surf = Channel.empty()
+        rh_pial_surf = Channel.empty()
+        lh_white_surf = Channel.empty()
+        rh_white_surf = Channel.empty()
+        lh_cortex_label = Channel.empty()
+        rh_cortex_label = Channel.empty()
+        lh_aparc_annot = Channel.empty()
+        rh_aparc_annot = Channel.empty()
+
+        pial_surf = Channel.empty()
+        white_surf = Channel.empty()
+        cortex_label = Channel.empty()
+        aparc_annot = Channel.empty()
+    }
 
     if (bold_only == 'TRUE') {
         bold_anat_prepare_input = t1_mgz.join(mask_mgz)
-    } else {
-        bold_aparc2aseg_presurf_input = aseg_presurf_mgz.join(pial_surf).join(white_surf).join(cortex_label).join(aparc_annot)
-        aparc_aseg_presurf_mgz = bold_aparc2aseg_presurf(subjects_dir, bold_aparc2aseg_presurf_input)
+        // In bold_only mode, we do not create aparc_aseg_presurf_mgz
+        // We'll handle surfaces if run_surface_steps is true
 
-        bold_anat_prepare_input = t1_mgz.join(mask_mgz)
+    } else {
+        // Not bold_only mode:
+        if (run_surface_steps) {
+            bold_aparc2aseg_presurf_input = aseg_presurf_mgz.join(pial_surf).join(white_surf).join(cortex_label).join(aparc_annot)
+            aparc_aseg_presurf_mgz = bold_aparc2aseg_presurf(subjects_dir, bold_aparc2aseg_presurf_input)
+            bold_anat_prepare_input = t1_mgz.join(mask_mgz)
+        } else {
+            // Surfaces not available, skip aparc_aseg_presurf creation
+            aparc_aseg_presurf_mgz = Channel.empty()
+            bold_anat_prepare_input = t1_mgz.join(mask_mgz)
+        }
     }
 
     (t1_nii, mask_nii, wm_dseg_nii, fsnative2T1w_xfm, wm_probseg_nii, gm_probseg_nii, csf_probseg_nii) = bold_anat_prepare(bold_preprocess_path, subjects_dir, work_dir, bold_anat_prepare_input)
 
     bold_fieldmap_output = bold_fieldmap(bids_dir, t1_nii, bold_preprocess_path, work_dir, bold_task_type, bold_spaces, bold_sdc, qc_result_path)
 
+    // Build bold_pre_process_input conditionally
     if (bold_only == 'TRUE') {
-        bold_pre_process_input = subject_id_boldfile_id.groupTuple(sort: true).join(bold_fieldmap_output, by:[0]).join(t1_nii).join(mask_nii, by: [0]).join(wm_dseg_nii, by:[0]).join(aparc_aseg_mgz).join(fsnative2T1w_xfm, by:[0]).join(pial_surf, by:[0]).transpose().join(subject_boldfile_txt, by:[0])
+        // bold_only uses aparc_aseg_mgz and surfaces if available
+        if (run_surface_steps) {
+            bold_pre_process_input = subject_id_boldfile_id.groupTuple(sort: true)
+                .join(bold_fieldmap_output, by:[0])
+                .join(t1_nii)
+                .join(mask_nii, by:[0])
+                .join(wm_dseg_nii, by:[0])
+                .join(aparc_aseg_mgz)
+                .join(fsnative2T1w_xfm, by:[0])
+                .join(pial_surf, by:[0])
+                .transpose()
+                .join(subject_boldfile_txt, by:[0])
+        } else {
+            // No surfaces
+            bold_pre_process_input = subject_id_boldfile_id.groupTuple(sort: true)
+                .join(bold_fieldmap_output, by:[0])
+                .join(t1_nii)
+                .join(mask_nii, by:[0])
+                .join(wm_dseg_nii, by:[0])
+                .join(aparc_aseg_mgz)
+                .join(fsnative2T1w_xfm, by:[0])
+                .transpose()
+                .join(subject_boldfile_txt, by:[0])
+        }
     } else {
-        bold_pre_process_input = subject_id_boldfile_id.groupTuple(sort: true).join(bold_fieldmap_output, by:[0]).join(t1_nii).join(mask_nii, by: [0]).join(wm_dseg_nii, by:[0]).join(aparc_aseg_presurf_mgz).join(fsnative2T1w_xfm, by:[0]).join(pial_surf, by:[0]).transpose().join(subject_boldfile_txt, by:[0])
+        // Not bold_only: uses aparc_aseg_presurf_mgz if surfaces are available
+        if (run_surface_steps) {
+            bold_pre_process_input = subject_id_boldfile_id.groupTuple(sort: true)
+                .join(bold_fieldmap_output, by:[0])
+                .join(t1_nii)
+                .join(mask_nii, by:[0])
+                .join(wm_dseg_nii, by:[0])
+                .join(aparc_aseg_presurf_mgz)
+                .join(fsnative2T1w_xfm, by:[0])
+                .join(pial_surf, by:[0])
+                .transpose()
+                .join(subject_boldfile_txt, by:[0])
+        } else {
+            // No surfaces, fallback to aparc_aseg_mgz
+            bold_pre_process_input = subject_id_boldfile_id.groupTuple(sort: true)
+                .join(bold_fieldmap_output, by:[0])
+                .join(t1_nii)
+                .join(mask_nii, by:[0])
+                .join(wm_dseg_nii, by:[0])
+                .join(aparc_aseg_mgz)
+                .join(fsnative2T1w_xfm, by:[0])
+                .transpose()
+                .join(subject_boldfile_txt, by:[0])
+        }
     }
+if (run_surface_steps) {
     subject_boldfile_txt_bold_pre_process = bold_pre_process(bids_dir, subjects_dir, bold_preprocess_path, work_dir, bold_spaces, bold_pre_process_input, fs_license_file, bold_sdc, qc_result_path)
-
+} else {
+    subject_boldfile_txt_bold_pre_process = bold_pre_process_vol_only(bids_dir, subjects_dir, bold_preprocess_path, work_dir, bold_spaces, bold_pre_process_input, fs_license_file, bold_sdc, qc_result_path)
+}
     if (do_bold_confounds == 'TRUE') {
-        bold_confounds_part1_inputs = subject_id_boldfile_id.groupTuple(sort: true).join(aseg_mgz).join(mask_mgz, by: [0]).transpose().join(subject_boldfile_txt_bold_pre_process, by: [0, 1])
+        bold_confounds_part1_inputs = subject_id_boldfile_id.groupTuple(sort: true)
+            .join(aseg_mgz)
+            .join(mask_mgz, by: [0])
+            .transpose()
+            .join(subject_boldfile_txt_bold_pre_process, by: [0, 1])
+
         confounds_part1_done = bold_confounds_part1(bids_dir, bold_preprocess_path, work_dir, bold_confounds_part1_inputs)
-        bold_confounds_part2_inputs = subject_id_boldfile_id.groupTuple(sort: true).join(wm_probseg_nii, by: [0]).join(gm_probseg_nii, by: [0]).join(csf_probseg_nii, by: [0]).join(mask_nii, by: [0]).join(aseg_mgz, by: [0]).join(mask_mgz, by:[0]).transpose().join(subject_boldfile_txt_bold_pre_process, by: [0, 1])
+
+        bold_confounds_part2_inputs = subject_id_boldfile_id.groupTuple(sort: true)
+            .join(wm_probseg_nii, by: [0])
+            .join(gm_probseg_nii, by: [0])
+            .join(csf_probseg_nii, by: [0])
+            .join(mask_nii, by: [0])
+            .join(aseg_mgz, by: [0])
+            .join(mask_mgz, by:[0])
+            .transpose()
+            .join(subject_boldfile_txt_bold_pre_process, by: [0, 1])
+
         confounds_part2_done = bold_confounds_part2(bids_dir, bold_preprocess_path, work_dir, bold_confounds_part2_inputs)
-        bold_confounds_combine_inputs = subject_id_boldfile_id.groupTuple(sort: true).transpose().join(confounds_part1_done, by: [0,1]).join(confounds_part2_done, by: [0,1]).transpose().join(subject_boldfile_txt_bold_pre_process, by: [0, 1])
+
+        bold_confounds_combine_inputs = subject_id_boldfile_id.groupTuple(sort: true)
+            .transpose()
+            .join(confounds_part1_done, by: [0,1])
+            .join(confounds_part2_done, by: [0,1])
+            .transpose()
+            .join(subject_boldfile_txt_bold_pre_process, by: [0, 1])
+
         bold_confounds_combine(bids_dir, bold_preprocess_path, work_dir, bold_confounds_combine_inputs)
     }
 
     output_std_volume_spaces = 'TRUE'
-    if  (template_space.toString().toUpperCase() != 'NONE') {
+    if (template_space.toString().toUpperCase() != 'NONE') {
         bold_T1_to_2mm_input = t1_mgz.join(norm_mgz)
         (t1_native2mm, norm_native2mm) = bold_T1_to_2mm(subjects_dir, bold_preprocess_path, bold_T1_to_2mm_input)
 
         if (bold_only == 'TRUE') {
             t1_native2mm_aparc_aseg = t1_native2mm.join(aseg_mgz)
         } else {
-            t1_native2mm_aparc_aseg = t1_native2mm.join(aseg_presurf_mgz)
+            // If run_surface_steps = true, we used aparc_aseg_presurf_mgz above. Otherwise fallback to aseg_mgz
+            t1_native2mm_aparc_aseg = t1_native2mm.join(run_surface_steps ? aseg_presurf_mgz : aseg_mgz)
         }
 
         bold_synthmorph_joint_input = t1_native2mm.join(norm_native2mm, by: [0])
@@ -2975,7 +3114,11 @@ workflow bold_wf {
     if (do_bold_qc == 'TRUE') {
         bold_tsnr_svg = qc_plot_tsnr(bids_dir, subject_boldfile_txt_bold_pre_process, bold_preprocess_path, qc_result_path, qc_utils_path)
 
-        qc_plot_carpet_inputs = subject_id_boldfile_id.groupTuple(sort: true).join(aparc_aseg_mgz).join(mask_mgz, by: [0]).transpose().join(subject_boldfile_txt_bold_pre_process, by: [0, 1])
+        qc_plot_carpet_inputs = subject_id_boldfile_id.groupTuple(sort: true)
+            .join(aseg_mgz)
+            .join(mask_mgz, by: [0])
+            .transpose()
+            .join(subject_boldfile_txt_bold_pre_process, by: [0, 1])
         bold_carpet_svg = qc_plot_carpet(bids_dir, qc_plot_carpet_inputs, bold_preprocess_path, qc_result_path, work_dir)
 
         if (template_space.toString().toUpperCase() != 'NONE') {
@@ -2988,7 +3131,12 @@ workflow bold_wf {
             boldref_file = bold_tsnr_svg
         }
 
-        qc_bold_create_report_input = subject_id_boldfile_id.groupTuple(sort: true).join(norm_to_mni152_svg).transpose().join(bold_to_mni152_svg, by: [0,1]).join(boldref_file, by: [0,1])
+        qc_bold_create_report_input = subject_id_boldfile_id.groupTuple(sort: true)
+            .join(norm_to_mni152_svg)
+            .transpose()
+            .join(bold_to_mni152_svg, by: [0,1])
+            .join(boldref_file, by: [0,1])
+
         qc_report = qc_bold_create_report(qc_bold_create_report_input, reports_utils_path, bids_dir, subjects_dir, qc_result_path)
     }
 }
