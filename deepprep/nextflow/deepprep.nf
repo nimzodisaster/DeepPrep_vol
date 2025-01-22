@@ -224,6 +224,45 @@ process anat_segment {
     """
 }
 
+
+process synthstripAPP {
+    // 7750
+    tag "${subject_id}"
+
+    label "with_gpu"
+    cpus 4
+    memory '7 GB'
+
+    input:
+    val(subjects_dir)
+    tuple(val(subject_id), val(orig_mgz))
+    val(infadult)
+    val(fastsurfer_home)
+    val(device)
+    val(gpu_lock)
+
+    output:
+    tuple(val(subject_id), val("${mask_mgz}")) // emit: 
+
+    script:
+    //gpu_script_py = "gpu_schedule_run.py"
+    script_py = "/opt/conda/envs/deepprep/bin/synthstrip"
+    //gpu_vram = 7750  // VRAM  MB
+
+    mask_mgz = "${subjects_dir}/${subject_id}/mri/mask.mgz"
+    """
+    mri_convert ${orig_mgz} ${orig_mgz.replace('.mgz', '.nii.gz')}
+    python ${script_py} \
+    -i ${orig_mgz.replace('.mgz', '.nii.gz')} \
+    -m ${mask_mgz.replace('.mgz', '.nii.gz')} \
+    -n 20 -b 2 \
+    --model ${infadult}
+    mri_convert ${mask_mgz.replace('.mgz', '.nii.gz')} ${mask_mgz}
+    """
+}
+
+
+
 process anat_reduce_to_aseg {
     tag "${subject_id}"
 
@@ -238,7 +277,7 @@ process anat_reduce_to_aseg {
 
     output:
     tuple(val(subject_id), val("${aseg_auto_noccseg_mgz}")) // emit: aseg_auto_noccseg_mgz
-    tuple(val(subject_id), val("${mask_mgz}")) // emit: mask_mgz
+    // tuple(val(subject_id), val("${mask_mgz}")) // emit: mask_mgz
 
     script:
     aseg_auto_noccseg_mgz = "${subjects_dir}/${subject_id}/mri/aseg.auto_noCCseg.mgz"
@@ -249,8 +288,7 @@ process anat_reduce_to_aseg {
     python3 ${script_py} \
     -i ${seg_deep_mgz} \
     -o ${aseg_auto_noccseg_mgz} \
-    --outmask ${mask_mgz} \
-    --fixwm
+    --fixwm   \removed the brainmaskcomponent
     """
 }
 
@@ -1992,6 +2030,7 @@ process bold_synthmorph_joint {
     gpu_script_py = "gpu_schedule_run.py"
     script_py = "${synthmorph_home}/bold_synthmorph_joint.py"
     synth_script = "${synthmorph_home}/mri_synthmorph_joint.py"
+    // gpu_vram = 18000  // VRAM  MB
     gpu_vram = 18000  // VRAM  MB
     """
     ${gpu_script_py} ${device} ${gpu_vram} executor ${script_py} \
@@ -2690,7 +2729,19 @@ workflow anat_wf {
 
     (orig_mgz, rawavg_mgz) = anat_motioncor(subjects_dir, subject_id, fsthreads)
     seg_deep_mgz = anat_segment(subjects_dir, orig_mgz, fastsurfer_home, device, gpu_lock)
-    (aseg_auto_noccseg_mgz, mask_mgz) = anat_reduce_to_aseg(subjects_dir, seg_deep_mgz, fastsurfer_home)
+    aseg_auto_noccseg_mgz = anat_reduce_to_aseg(subjects_dir, seg_deep_mgz, fastsurfer_home)
+    infmodel = params.infmodel.toString()
+    def infadult = ''
+    if (infmodel == "1") {
+        infadult = "${freesurfer_home}/models/synthstrip.infant.1.pt"
+    } else {
+        infadult == "${freesurfer_home}/models/synthstrip.1.pt"
+    }
+    println "infmodel: ${infmodel}"
+    println "infadult: ${infadult}"
+    xx =
+    mask_mgz = synthstripAPP(subjects_dir, orig_mgz, infadult,fastsurfer_home,device, gpu_lock)     
+
     anat_N4_bias_correct_input = orig_mgz.join(mask_mgz)
     orig_nu_mgz = anat_N4_bias_correct(subjects_dir, anat_N4_bias_correct_input, fastsurfer_home, fsthreads)
 
@@ -2927,6 +2978,7 @@ workflow bold_wf {
     bold_only = params.bold_only.toString().toUpperCase()
     deepprep_version = params.deepprep_version
 
+
     subject_boldfile_txt = bold_get_bold_file_in_bids(bids_dir, subjects_dir, participant_label, bold_task_type, bold_only, gpu_lock)
     (subject_id, boldfile_id, subject_boldfile_txt) = subject_boldfile_txt.flatten().multiMap { it ->
         a: it.name.split('_')[0]
@@ -3153,7 +3205,7 @@ workflow {
     subjects_dir = params.subjects_dir
     bold_spaces = params.bold_surface_spaces
     bold_only = params.bold_only
-
+    
     participant_label = params.participant_label
     exec_env = params.exec_env
     skip_bids_validation = params.skip_bids_validation
