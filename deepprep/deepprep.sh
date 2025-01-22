@@ -13,6 +13,7 @@ deepprep_home="/opt/DeepPrep"
 container=""
 ignore_error=""
 debug=""
+infmodel="0"   # <-- Default value for infmodel
 
 help="DeepPrep args:
 deepprep-docker [bids_dir] [output_dir] [{participant}] [--bold_task_type '[task1 task2 task3 ...]']
@@ -24,6 +25,7 @@ deepprep-docker [bids_dir] [output_dir] [{participant}] [--bold_task_type '[task
                 [--device { {auto 0 1 2...} cpu}]
                 [--cpus 10] [--memory 20]
                 [--ignore_error] [--resume]
+                [--infmodel {0 or 1}]
 "
 
 if [ $# -le 1 ]; then
@@ -106,6 +108,11 @@ while [[ $# -gt 0 ]]; do
       debug="True"
       echo "Input --debug : ${debug}"
       ;;
+    --infmodel)       # <-- New parameter
+      infmodel="$2"
+      echo "Input --infmodel : ${infmodel}"
+      shift
+      ;;
     -h|-help|--help)
       echo "${help}"
       exit 0
@@ -124,8 +131,8 @@ if [ -z "${freesurfer_home}" ]; then
   exit 1
 fi
 
-nextflow_work_dir="${output_dir}/WorkDir/nextflow"  # output_dir/WorkDir/nextflow
-qc_dir="${output_dir}/QC"  # output_dir/QC
+nextflow_work_dir="${output_dir}/WorkDir/nextflow"
+qc_dir="${output_dir}/QC"
 
 if [ ! -d "${nextflow_work_dir}" ]; then
   mkdir -p "${nextflow_work_dir}"
@@ -229,6 +236,10 @@ else
   sed -i "s@\${output_dir}@${output_dir}@g" "${run_config}"
   sed -i "s@\${subjects_dir}@${subjects_dir}@g" "${run_config}"
 fi
+
+# Add infmodel parameter to the Nextflow arguments
+args+=("--infmodel")
+args+=("${infmodel}")
 
 cd "${nextflow_work_dir}" && \
 nextflow run "${nextflow_file}" \
