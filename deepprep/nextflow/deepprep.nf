@@ -258,6 +258,7 @@ process synthstripAPP {
     -n 20 -b 2 \
     --model ${infadult}
     mri_convert ${mask_mgz.replace('.mgz', '.nii.gz')} ${mask_mgz}
+    mri_convert --in_like ${orig_mgz} ${mask_mgz} ${mask_mgz}
     """
 }
 
